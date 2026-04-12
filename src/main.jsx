@@ -4,7 +4,8 @@ import App from "./App.jsx";
 import { createBrowserRouter, RouterProvider} from "react-router-dom";
 import Upload from "./pages/Upload";
 import Home from './pages/Home';
-import Explorer  from './pages/Explorer.jsx';
+import File from './pages/File.jsx';
+import Explorer from './pages/Explorer.jsx';
 
 const router = createBrowserRouter(
     [
@@ -17,12 +18,16 @@ const router = createBrowserRouter(
           element: <Home />,
         },
         {
-          path: "/*",
-          element: <Explorer  />,
+          path: "/folder/:id",
+          element: <Explorer />,
         },
         {
           path: "/upload",
           element: <Upload />,
+        },
+        {
+          path: "/file/:id",
+          element: <File />,
         },
       ],
     }
