@@ -9,11 +9,11 @@ const FolderHeader = ({ name, onRefresh, parentDirId }) => {
     if (!folderName || folderName.trim() === "") return;
 
     try {
-      await folderAPI.createFolder(parentDirId, folderName);
-      alert("Folder created successfully!");
+      const response = await folderAPI.createFolder(parentDirId, folderName);
+      alert(response.msg || "Folder created successfully!");
       onRefresh?.();
     } catch (error) {
-      alert("Failed to create folder");
+      alert(error.msg || "Failed to create folder");
       console.error("Create folder error:", error);
     }
   };
