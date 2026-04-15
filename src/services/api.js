@@ -30,7 +30,7 @@ export const folderAPI = {
   },
 
   deleteItem: async (path, name) => {
-    const response = await fetch(`${API_BASE}/${path}/${name}`, {
+    const response = await fetch(`${API_BASE}/folder/${path}`, {
       method: "DELETE",
     });
     if (!response.ok) throw new Error("Failed to delete item");
@@ -47,7 +47,7 @@ export const fileAPI = {
       
       
       xhr.onload = () => {
-        if (xhr.status === 200) {
+        if (xhr.status === 201) {
           resolve();
         } else {
           reject(new Error("Upload failed"));

@@ -19,7 +19,7 @@ const Explorer = () => {
   return (
     <div className="p-8 m-auto text-amber-50">
       <FolderHeader name={folderName} parentDirId={folderId} onRefresh={refetch} />
-      <UploadForm onUpload={refetch} />
+      <UploadForm folderId={folderId} onUpload={refetch} />
       <FileList files={files} folders={folders} folderId={folderId} onDelete={refetch} />
     </div>
   );

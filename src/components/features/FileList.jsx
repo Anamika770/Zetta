@@ -15,8 +15,9 @@ const FileList = ({ files, folders, folderId, onDelete }) => {
     <ul className="space-y-0 rounded border border-gray-700">
       {folders?.map((folder) => (
         <FolderListItem
-          key={folder.id || folder.name}
+          key={folder?.id || folder?.name}
           isFolder={true}
+          folderId={folderId}
           folder={folder}
           onDelete={onDelete}
         />

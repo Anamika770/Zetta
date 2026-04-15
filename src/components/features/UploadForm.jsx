@@ -4,22 +4,24 @@ import Button from "../ui/Button";
 import { fileAPI } from "../../services/api";
 import { useParams } from "react-router-dom";
 
-const UploadForm = ({ onUpload }) => {
+const UploadForm = ({ onUpload, folderid }) => {
   const [file, setFile] = useState(null);
   const [uploading, setUploading] = useState(false);
   const location = useLocation();
   const params = useParams();
   console.log("PATH:", location.pathname);
-  const folderId = params.id;
+  const folderId = params.id || folderid;
   console.log("FOLDER ID:", folderId);
+
   const handleFileSubmit = async (e) => {
     e.preventDefault();
     if (!file) return;
 
     setUploading(true);
-    try { 
+    try {
       await fileAPI.upload(folderId, file);
       alert("File uploaded successfully!");
+      onUpload?.();
       setFile(null);
     } catch (error) {
       alert("File upload failed");
@@ -47,11 +49,7 @@ const UploadForm = ({ onUpload }) => {
           disabled={uploading}
         />
         {file && <span className="text-sm text-gray-400">{file.name}</span>}
-        <Button
-          type="submit"
-          variant="success"
-          disabled={!file || uploading}
-        >
+        <Button type="submit" variant="success" disabled={!file || uploading}>
           {uploading ? "Uploading..." : "Upload"}
         </Button>
       </div>
