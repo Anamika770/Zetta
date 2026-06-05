@@ -1,113 +1,167 @@
 import express from "express";
 import path from "node:path";
+import mime from "mime-types";
 import { createWriteStream } from "node:fs";
 import { rm } from "node:fs/promises";
-import filesDbData from "../data/filesDb.json" with { type: "json" };
-import foldersDbData from "../data/foldersDb.json" with { type: "json" };
 import { writeFile } from "node:fs/promises";
+import { ObjectId } from 'mongodb';
+import validateIdMiddleware from "../middlewares/validateIdMiddleware.js";
 
 const router = express.Router();
 
+router.param("parentDirId", validateIdMiddleware);
+router.param("id", validateIdMiddleware);
+
 //read file
-router.get("/:id", async (req, res) => {
+router.get("/:id", async (req, res, next) => {
   const base = path.resolve("./storage");
   const fileId = req.params.id;
-  const fileData = filesDbData.find((file) => file.id === fileId);
+  const user = req.user;
+  const db = req.db;
+  const filesCollection = db.collection("files");
+  const foldersCollection = db.collection("folders")
 
-  if (!fileData) {
-    return res.status(404).json({ error: "File not found" });
-  }
-
-  const filePath = path.join(base, fileId + fileData.extension);
-
-  if (!filePath.startsWith(base + path.sep)) {
-    return res.status(403).json({ error: "Access denied" });
-  }
-
-  if (req.query.action === "download") {
-    res.set("Content-Disposition", "attachment");
-  }
-  
-  res.on("close", () => {
-    console.log("Client disconnected");
-  });
-
-  return res.sendFile(`${filePath}`, (err) => {
-    if (err) {
-      console.log(err);
-      if (!res.headersSent) {
-        return res.status(500).json({ error: "Failed to read file" });
-      }
+  try {
+    const fileData = await filesCollection.findOne({ _id: new ObjectId(fileId), user: user._id });
+    if (!fileData) {
+      return res.status(404).json({ error: "File not found" });
     }
-  });
+
+    const parentDir = await foldersCollection.findOne({ _id: fileData?.parentDirId, user: user._id })
+    if (!parentDir) {
+      return res.status(404).json({ error: "Parent directory not found!" });
+    }
+
+    const filePath = path.join(base, fileId + fileData.extension);
+
+    if (!filePath?.startsWith(base + path.sep)) {
+      return res.status(403).json({ error: "Access denied" });
+    }
+
+    res.on("close", () => {
+      console.log("Client disconnected");
+    });
+
+    if (req.query.action === "download") {
+      return res.download(filePath, fileData.name, (err) => {
+        if (err) {
+          console.log(err);
+          if (!res.headersSent) {
+            return res.status(500).json({ error: "Failed to download file" });
+          }
+        }
+      });
+    }
+    return res.sendFile(`${filePath}`, (err) => {
+      if (err) {
+        console.log(err);
+        if (!res.headersSent) {
+          return res.status(500).json({ error: "Failed to read file" });
+        }
+      }
+    });
+
+  } catch (err) {
+    next(err)
+  }
 });
 
 //create file
-router.post("/:parentDirId?", (req, res, next) => {
-  const fileName = req.headers.filename || "untitled"; 
-  const extension = path.extname(fileName);
-  const parentDirId = req.params.parentDirId || req.rootFolderId;
-  const basePath = path.resolve("./storage");
-  const id = crypto.randomUUID();
-  const filePath = path.join(basePath, `${id}${extension}`);
+router.post("/:parentDirId?", async (req, res, next) => {
+  let fileName = req.headers.filename || "untitled";
+  const user = req.user;
+  const parentDirId = req.params.parentDirId || user.rootFolderId;
+  const db = req.db;
+  const filesCollection = db.collection("files")
+  const foldersCollection = db.collection("folders")
+
   if (!parentDirId) {
     return res.status(400).json({ error: "Parent directory ID is required" });
   }
-  const writeStream = createWriteStream(filePath);
-  req.pipe(writeStream);
 
-  const newFileData = {
-    id,
-    name: fileName,
-    extension: path.extname(fileName),
-    mimeType: fileName.split(".").pop(),
-    parentDirId,
-  };
-  writeStream.on("error", (err) => {
-    next(err);
-    res.status(500).json({ error: "Failed to upload file" });
+  const parentDirData = await foldersCollection.findOne({
+    _id: new ObjectId(parentDirId),
+    user: req.user._id,
   });
 
-  writeStream.on("finish", async () => {
-    filesDbData.push(newFileData);
-    const folderIndex = foldersDbData.findIndex((folder) => folder.id === parentDirId);
-    if (folderIndex === -1) {
-      return res.status(404).json({ error: "Parent folder not found" });
+  // Check if parent directory exists
+  if (!parentDirData) {
+    return res.status(404).json({ error: "Parent directory not found!" });
+  }
+
+  // Input validation
+  if (typeof fileName !== 'string' || fileName.trim().length === 0 || fileName.trim().length > 255) {
+    return res.status(400).json({ error: "File name must be between 1 and 255 characters" });
+  }
+  try {
+
+    const basePath = path.resolve('./storage');
+    const _id = new ObjectId();
+    const filePath = path.join(basePath, `${_id}${path.extname(fileName)}`)
+    const extension = path.extname(fileName);
+    const mimeType = mime.lookup(fileName) || "application/octet-stream";
+
+    //prevent duplicate fileName
+    const duplicateFiles = await filesCollection.find({ parentDirId: new ObjectId(parentDirId), name: {$regex: `^${fileName}$`, $options: 'i'}, user: user._id }).toArray();
+    if (duplicateFiles.length > 0) {
+      console.log(duplicateFiles);
+      fileName = fileName + `(${duplicateFiles.length})`;
     }
-    foldersDbData[folderIndex].files.push(id);
-    try {
-      await writeFile(
-        "./data/filesDb.json",
-        JSON.stringify(filesDbData),
-      );
-      await writeFile(
-        "./data/foldersDb.json",
-        JSON.stringify(foldersDbData),
-      );
-      return res.status(201).json({ message: "File uploaded successfully" });
-    } catch (err) {
+
+    const writeStream = createWriteStream(filePath);
+    req.pipe(writeStream);
+    
+    writeStream.on("error", (err) => {
       next(err);
-    }
-  });
+    });
 
+    const newFileData = {
+      _id,
+      name: fileName,
+      extension: extension,
+      parentDirId: new ObjectId(parentDirId),
+      user: user._id,
+      mimeType: mimeType,
+      
+    };
+
+    writeStream.on("finish", async () => {
+      await filesCollection.insertOne(newFileData);
+      return res.status(201).json({ message: "File uploaded successfully" });
+    })
+
+  } catch (err) {
+    console.dir(err, { depth: null });
+    next(err);
+  }
 });
+
 
 //update file name
 router.patch("/:id", express.json(), async (req, res) => {
   const fileId = req.params.id;
-  let { newName } = req.body;
-  newName = newName.trim();
-  const fileIndex = filesDbData.findIndex(f => f.id === fileId);
-  if (fileIndex === -1) {
-    return res.status(404).json({ error: "File not found" });
-  }
+  const newName = req.body.newName;
+  const user = req.user;
+  const db = req.db;
+  const filesCollection = db.collection("files");
+
   if (!newName || typeof newName !== "string" || newName.trim() === "") {
     return res.status(400).json({ error: "Invalid file name" });
   }
-  filesDbData[fileIndex].name = newName;
-
+  const trimmedName = newName.trim();
   try {
-    await writeFile("./data/filesDb.json", JSON.stringify(filesDbData));
+    const isDuplicateFile = await filesCollection.findOne({ 
+      name: trimmedName, 
+      parentDirId: new ObjectId(req.body.parentDirId), 
+      user: user._id,
+      _id: { $ne: new ObjectId(fileId) }
+    });
+    if (isDuplicateFile) {
+      return res.status(400).json({ error: "File name must be unique within the same directory" });
+    }
+
+    await filesCollection.updateOne({ _id: new ObjectId(fileId), user: user._id }, { $set: { name: trimmedName } });
+
     return res.json({ msg: "File renamed successfully." });
   } catch (err) {
     console.log(err);
@@ -123,25 +177,21 @@ router.delete("/:id", async (req, res) => {
   if (!fileId) {
     return res.status(400).json({ error: "File ID is required" });
   }
-  const fileIndex = filesDbData.findIndex(f => f.id === fileId);
-  if (fileIndex === -1) {
+  const user = req.user;
+  const db = req.db;
+  const filesCollection = db.collection("files");
+  const fileData = await filesCollection.findOne({ _id: new ObjectId(fileId), user: user._id });
+  if (!fileData) {
     return res.status(404).json({ error: "File not found" });
   }
-  const fileData = filesDbData[fileIndex];
-  const extension = path.extname(fileData.name);
-  const filePath = path.resolve(`./storage/${fileId}${extension}`);
-  console.log(fileId);
-  console.log("File found at index:", fileIndex);
+
+  const filePath = path.resolve(`./storage/${fileId}${fileData.extension}`);
   try {
-    const parentDir = foldersDbData.find(folder => folder.id === fileData.parentDirId);
-    if (!parentDir) {
-      return res.status(404).json({ error: "Parent folder not found" });
+    const deleteResult = await filesCollection.deleteOne({ _id: new ObjectId(fileId), user: user._id });
+    if (deleteResult.deletedCount === 0) {
+      return res.status(404).json({ error: "File not found" });
     }
     await rm(filePath);
-    filesDbData.splice(fileIndex, 1);
-    parentDir.files = parentDir.files.filter(id => id !== fileId);
-    await writeFile("./data/filesDb.json", JSON.stringify(filesDbData));
-    await writeFile("./data/foldersDb.json", JSON.stringify(foldersDbData));
     return res.json({ msg: "File deleted successfully." });
   } catch (err) {
     console.log(err);

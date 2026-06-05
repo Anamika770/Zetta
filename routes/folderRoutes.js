@@ -1,57 +1,75 @@
 import express from "express";
-import filesDbData from "../data/filesDb.json" with { type: "json" };
-import foldersDbData from "../data/foldersDb.json" with { type: "json" };
-import usersDbData from "../data/usersDb.json" with { type: "json" };
 import { writeFile, rm } from "node:fs/promises";
 import path from "node:path";
+import mongoDb from 'mongodb';
+import { client } from "../db/db.js";
+import validateIdMiddleware from "../middlewares/validateIdMiddleware.js";
 
 const router = express.Router();
 
+
 //read folder and its content
 router.get("/:folderId?", async (req, res) => {
-  const folderId = req.params.folderId || req.rootFolderId; // default to root folder if no id provided
-  const folderData = foldersDbData.find((folder) => folder.id === folderId);
-
-  if (!folderData) {
-    return res.status(404).json({ error: "Folder not found" });
+  const user = req.user;
+  const db = req.db;
+  const foldersCollection = db.collection("folders");
+  const filesCollection = db.collection("files");
+  const folderId = req.params.folderId === "root" ? req.user.rootFolderId : req.params.folderId;
+  if (!folderId) {
+    return res.status(400).json({ error: "Folder ID is required" });
   }
-  const files = folderData.files.map(
-    (fileId) => filesDbData.find((file) => file.id === fileId)
-  );
+  try {
+    const folderData = await foldersCollection.findOne({ _id: new mongoDb.ObjectId(folderId), user: user._id });
+    if (!folderData) {
+      return res.status(404).json({ error: "Folder not found" });
+    }
+    const files = await filesCollection.find({ parentDirId: new mongoDb.ObjectId(folderId), user: user._id }).toArray()
+    const folders = await foldersCollection.find({ parentDirId: new mongoDb.ObjectId(folderId), user: user._id }).toArray()
+    res.json({
+      ...folderData,
+      id: folderData._id.toString(),
+      files: files.map(({ _id, ...file }) => ({
+        ...file,
+        id: _id.toString()
+      })),
+      folders: folders.map(({ _id, ...folder }) => ({
+        ...folder,
+        id: _id.toString()
+      }))
+    });
 
-  const folders = folderData.folders.map(
-    (folderId) => foldersDbData.find((folder) => folder.id === folderId)
-  );
+  } catch (err) {
+    console.log(err);
+    res.status(500).json({ error: "Failed to retrieve folder contents" });
+  }
 
-  res.json({ ...folderData, files, folders });
 });
 
 //create folder
 router.post("/:parentDirId?", express.json(), async (req, res) => {
+  console.log(req.params.parentDirId);
+  const db = req.db;
+  const folderCollection = db.collection("folders");
+  const user = req.user;
   const folderName = req.body.folderName || "New Folder";
-  const isUniqueFolder = foldersDbData.every(f => f.name !== folderName || f.parentDirId !== (req.params.parentDirId || null));
-  if (!isUniqueFolder) {
-    return res.status(400).json({ error: "Folder name must be unique within the same directory" });
-  }
-  const parentDirId = req.params.parentDirId || null;
-  const newFolderData = {
-    id: crypto.randomUUID(),
-    name: folderName,
-    parentDirId: parentDirId,
-    user: null,
-    files: [],
-    folders: [],
-  };
-  const folderData = foldersDbData.find((folder) => folder.id === parentDirId);
-  if (!folderData) {
-    return res.status(404).json({ error: "Parent folder not found" });
-  }
-  foldersDbData.push(newFolderData);
-  folderData.folders.push(newFolderData.id);
+  const parentDirId = req.params.parentDirId === "root" ? user.rootFolderId : req.params.parentDirId;
 
   try {
-    await writeFile('./data/foldersDb.json', JSON.stringify(foldersDbData));
-    console.log('done');
+    const isDuplicateFolder = await folderCollection.findOne({ name: folderName, parentDirId: new mongoDb.ObjectId(parentDirId), user: user._id });
+    if (isDuplicateFolder) {
+      return res.status(400).json({ error: "Folder name must be unique within the same directory" });
+    }
+    console.log({isDuplicateFolder});
+    const newFolderData = {
+      _id: new mongoDb.ObjectId(),
+      name: folderName,
+      parentDirId: new mongoDb.ObjectId(parentDirId),
+      user: user._id
+    };
+    const result = await folderCollection.insertOne(newFolderData);
+    if (!result.insertedId) {
+      return res.status(500).json({ error: "Failed to create folder" });
+    }
 
     res.json({ msg: "folder created Successfully." });
   } catch (err) {
@@ -61,20 +79,29 @@ router.post("/:parentDirId?", express.json(), async (req, res) => {
 
 //update folder name
 router.patch("/:id", express.json(), async (req, res) => {
+  const user = req.user;
+  const db = req.db;
+  const foldersCollection = db.collection("folders");
   const folderId = req.params.id;
-  let { newName } = req.body;
-  newName = newName.trim();
-  const folderIndex = foldersDbData.findIndex(f => f.id === folderId);
-  if (folderIndex === -1) {
-    return res.status(404).json({ error: "Folder not found" });
-  }
+  const newName = req.body.newName;
+
   if (!newName || typeof newName !== "string" || newName.trim() === "") {
     return res.status(400).json({ error: "Invalid folder name" });
   }
-  foldersDbData[folderIndex].name = newName;
+  const trimmedName = newName.trim();
 
   try {
-    await writeFile("./data/foldersDb.json", JSON.stringify(foldersDbData));
+
+    const isDuplicateFolder = await foldersCollection.findOne({ 
+      name: trimmedName, 
+      parentDirId: new mongoDb.ObjectId(req.body.parentDirId), 
+      user: user._id,
+      _id: { $ne: new mongoDb.ObjectId(folderId) }
+    });
+    if (isDuplicateFolder) {
+      return res.status(400).json({ error: "Folder name must be unique within the same directory" });
+    }
+    await foldersCollection.updateOne({ _id: new mongoDb.ObjectId(folderId), user: user._id }, { $set: { name: trimmedName } });
     return res.json({ msg: "Folder renamed successfully." });
   } catch (err) {
     console.log(err);
@@ -86,60 +113,53 @@ router.patch("/:id", express.json(), async (req, res) => {
 
 //delete folder
 router.delete("/:id", async (req, res) => {
+  const user = req.user;
+  const db = req.db;
+  const foldersCollection = db.collection("folders");
+  const filesCollection = db.collection("files");
   const folderId = req.params.id;
-  const folderIndex = foldersDbData.findIndex(f => f.id === folderId);
-  if (folderIndex === -1) {
-    console.log({ folderIndex });
-    return res.status(404).json({ error: "Folder not found" });
-  }
+  const folders = [];
+  const files = [];
 
-  const parentDirId = foldersDbData[folderIndex].parentDirId;
-  const parentDirIndex = foldersDbData.findIndex(f => f.id === parentDirId);
-  if (parentDirIndex === -1) {
-    return res.status(404).json({ error: "Parent folder not found" });
-  }
-  foldersDbData[parentDirIndex].folders.splice(foldersDbData[parentDirIndex].folders.indexOf(folderId), 1);
-
-  function collectAll(folder) {
-    let result = {
-      folderIds: [folder.id],
-      files: [...folder.files]
-    };
-    for (const subFolderId of folder.folders) {
-      const subFolder = foldersDbData.find(f => f.id === subFolderId);
-      if (subFolder) {
-        const subResult = collectAll(subFolder);
-        result.folderIds.push(...subResult.folderIds);
-        result.files.push(...subResult.files);
-      }
+  async function getAllNestedItems(folderId) {
+    const nestedFolders = await foldersCollection.find({ parentDirId: new mongoDb.ObjectId(folderId), user: user._id }, { projection: { _id: 1 } }).toArray();
+    const nestedFiles = await filesCollection.find({ parentDirId: new mongoDb.ObjectId(folderId), user: user._id }, { projection: { _id: 1, extension: 1 } }).toArray();
+    folders.push(...nestedFolders);
+    files.push(...nestedFiles);
+    for (const nestedFolder of nestedFolders) {
+      await getAllNestedItems(nestedFolder._id);
     }
-    return result;
   }
-
+  const session = await client.startSession();
 
   try {
-    const { folderIds, files } = collectAll(foldersDbData[folderIndex]);
-    for (const file of files) {
-      const fileData = filesDbData.find(f => f.id === file);
-      await rm(`./storage/${fileData.id}${path.extname(fileData.name)}`);
-    }
-    const remainingFiles = filesDbData.filter(f => !files.includes(f.id));
-    filesDbData.length = 0; // This clears the constant array safely
-    filesDbData.push(...remainingFiles); // This fills it back up
+    await getAllNestedItems(folderId);
+    console.log(folders);
+    console.log(files);
 
-    const remainingFolders = foldersDbData.filter(f => !folderIds.includes(f.id));
-    foldersDbData.length = 0; // Clears the constant array
-    foldersDbData.push(...remainingFolders);
-    await writeFile("./data/foldersDb.json", JSON.stringify(foldersDbData));
-    await writeFile("./data/filesDb.json", JSON.stringify(filesDbData));
+    session.startTransaction();
+    await foldersCollection.deleteMany({ user: user._id, _id: { $in: folders.map(folder => folder._id) } }, { session });
+    await filesCollection.deleteMany({ user: user._id, _id: { $in: files.map(file => file._id) } }, { session });
+    await foldersCollection.deleteOne({ _id: new mongoDb.ObjectId(folderId), user: user._id }, { session });
+
+    await session.commitTransaction();
+
+    for (const file of files) {
+      const filePath = path.join(process.cwd(), "storage", `${file._id.toString()}${file.extension}`);
+      console.log(filePath);
+      await rm(filePath);
+    }
+
     return res.json({ msg: "Folder deleted successfully." });
 
   } catch (err) {
     console.log(err);
+    await session.abortTransaction();
     return res.status(500).json({
       msg: "could not delete folder."
     })
   }
+  await client.close();
 });
 
 export default router;
